@@ -303,7 +303,7 @@
           <div class="step-num">2</div>
           <div>
             <div class="step-title">Bring your items on May 12th</div>
-            <div class="step-desc">Bring your items to the <strong>Brookwood Building</strong> on <strong>Tuesday, May 12th at 7:00 PM</strong>. We'll be assembling the kits together that evening — we'd love for you to stay and be part of it!</div>
+            <div class="step-desc">Bring your items to the <strong>Brookwood Building</strong> on <strong>Monday, May 12th at 7:00 PM</strong>. We'll be assembling the kits together that evening — we'd love for you to stay and be part of it!</div>
           </div>
         </div>
         <div class="instruction-step">
@@ -378,9 +378,13 @@
 
 <div class="toast" id="toast"></div>
 
-<script>
+<!-- Firebase SDK -->
+<script type="module">
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+import { getDatabase, ref, set, get, onValue, push } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js';
+
 // ══════════════════════════════════════════
-//  CONFIG  — change password here
+//  CONFIG
 // ══════════════════════════════════════════
 const ADMIN_PASSWORD = 'kitdrive2026';
 const TARGET = 75;
@@ -393,12 +397,51 @@ const ITEMS = [
 ];
 
 // ══════════════════════════════════════════
-//  DATA
+//  FIREBASE INIT  (same project as trivia game)
 // ══════════════════════════════════════════
-let signups = JSON.parse(localStorage.getItem('kitSignups') || '[]');
-function saveSignups() { localStorage.setItem('kitSignups', JSON.stringify(signups)); }
+const firebaseConfig = {
+  apiKey: "AIzaSyDxMbjvHKpjOS5kVKMdscAHLeojAlFlxJE",
+  authDomain: "kit-drive-signup.firebaseapp.com",
+  databaseURL: "https://kit-drive-signup-default-rtdb.firebaseio.com",
+  projectId: "kit-drive-signup",
+  storageBucket: "kit-drive-signup.firebasestorage.app",
+  messagingSenderId: "859636172550",
+  appId: "1:859636172550:web:4f0f8b55d15e01b0b60087"
+};
+const app = initializeApp(firebaseConfig, 'kitdrive');
+const db  = getDatabase(app);
+const SIGNUPS_REF = ref(db, 'kitDriveSignups');
+
+// ══════════════════════════════════════════
+//  DATA  (live from Firebase)
+// ══════════════════════════════════════════
+let signups = [];
+
 function getItemTotal(id) { return signups.reduce((s,e) => s+(e.items[id]||0), 0); }
 function getOverallProgress() { return Math.min(...ITEMS.map(it => Math.min(getItemTotal(it.id), TARGET))); }
+
+// Save a single new entry to Firebase
+async function saveSignup(entry) {
+  // Use email (sanitised) as key so same person can't double-submit
+  const key = entry.email.toLowerCase().replace(/[.#$\[\]]/g, '_');
+  await set(ref(db, 'kitDriveSignups/' + key), entry);
+}
+
+// Migrate any old localStorage data up to Firebase once
+async function migrateLocalStorage() {
+  const old = localStorage.getItem('kitSignups');
+  if (!old) return;
+  try {
+    const arr = JSON.parse(old);
+    if (!arr.length) return;
+    for (const entry of arr) {
+      const key = entry.email.toLowerCase().replace(/[.#$\[\]]/g, '_');
+      await set(ref(db, 'kitDriveSignups/' + key), entry);
+    }
+    localStorage.removeItem('kitSignups'); // clear after migration
+    console.log('Migrated', arr.length, 'local sign-ups to Firebase.');
+  } catch(e) { console.warn('Migration failed', e); }
+}
 
 // ══════════════════════════════════════════
 //  PAGE ROUTING
@@ -409,21 +452,40 @@ function showPage(id) {
   window.scrollTo({top:0, behavior:'smooth'});
 }
 
-// ?admin in URL → go straight to login
 if (window.location.search.includes('admin')) {
   if (sessionStorage.getItem('adminAuth')==='1') {
     showPage('pageAdmin');
-    // will call renderAdmin after DOM ready — see bottom
   } else {
     showPage('pageAdminLogin');
   }
 }
 
 // ══════════════════════════════════════════
+//  LIVE DATA LISTENER  — updates every page
+//  in real-time whenever Firebase changes
+// ══════════════════════════════════════════
+onValue(SIGNUPS_REF, (snapshot) => {
+  const data = snapshot.val() || {};
+  signups = Object.values(data);
+  renderItems();
+  renderOverall();
+  // If admin dashboard is open, refresh it too
+  if (document.getElementById('pageAdmin').classList.contains('active')) {
+    renderAdminData();
+  }
+});
+
+// ══════════════════════════════════════════
 //  SIGN-UP PAGE
 // ══════════════════════════════════════════
 function renderItems() {
   const grid = document.getElementById('itemsGrid');
+  // Preserve qty inputs the user may have typed
+  const saved = {};
+  ITEMS.forEach(it => {
+    const el = document.getElementById('qty_'+it.id);
+    if (el) saved[it.id] = el.value;
+  });
   grid.innerHTML = '';
   ITEMS.forEach(item => {
     const total = getItemTotal(item.id);
@@ -433,6 +495,7 @@ function renderItems() {
     const card = document.createElement('div');
     card.className = 'item-card' + (full ? ' full' : '');
     card.id = 'card_' + item.id;
+    const savedVal = saved[item.id] || '';
     card.innerHTML = `
       <div class="item-info">
         <div class="item-name">${item.emoji} ${item.name}</div>
@@ -446,21 +509,22 @@ function renderItems() {
       <div class="item-qty">
         <div class="qty-label">I'll bring</div>
         <input type="number" class="qty-input" id="qty_${item.id}"
-          min="0" max="${TARGET}" value="" placeholder="0"
+          min="0" max="${TARGET}" value="${savedVal}" placeholder="0"
           ${full ? 'disabled' : ''}
           oninput="updateCardState('${item.id}')"
         >
       </div>
     `;
+    if (savedVal > 0) card.classList.add('selected');
     grid.appendChild(card);
   });
 }
 
-function updateCardState(itemId) {
+window.updateCardState = function(itemId) {
   const qty = parseInt(document.getElementById('qty_'+itemId).value)||0;
   const card = document.getElementById('card_'+itemId);
   if (qty > 0) card.classList.add('selected'); else card.classList.remove('selected');
-}
+};
 
 function renderOverall() {
   const kits = getOverallProgress();
@@ -469,7 +533,7 @@ function renderOverall() {
   document.getElementById('overallCount').textContent = `${kits} of ${TARGET} kits covered`;
 }
 
-function handleSubmit() {
+window.handleSubmit = async function() {
   const name  = document.getElementById('userName').value.trim();
   const email = document.getElementById('userEmail').value.trim();
   const nameEl  = document.getElementById('userName');
@@ -496,13 +560,31 @@ function handleSubmit() {
   });
   if (!Object.keys(capped).length) { showToast('All selected items are already fully covered! 🎉'); return; }
 
-  let entry = signups.find(s => s.email.toLowerCase() === email.toLowerCase());
-  if (!entry) { entry = {name, email, items:{}, date: new Date().toLocaleDateString()}; signups.push(entry); }
-  else { entry.name = name; }
-  ITEMS.forEach(item => { if (capped[item.id]) entry.items[item.id] = (entry.items[item.id]||0) + capped[item.id]; });
-  saveSignups();
-  showConfirmPage(name, email, capped);
-}
+  // Build entry — merge with existing if same email
+  const existing = signups.find(s => s.email.toLowerCase() === email.toLowerCase());
+  const entry = existing
+    ? { ...existing, name }
+    : { name, email, items:{}, date: new Date().toLocaleDateString() };
+  ITEMS.forEach(item => {
+    if (capped[item.id]) entry.items[item.id] = (entry.items[item.id]||0) + capped[item.id];
+  });
+
+  // Disable button to prevent double-submit
+  const btn = document.querySelector('.submit-btn');
+  btn.disabled = true;
+  btn.innerHTML = '<span>Saving…</span>';
+
+  try {
+    await saveSignup(entry);
+    showConfirmPage(name, email, capped);
+  } catch(e) {
+    showToast('Error saving — please try again.');
+    console.error(e);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<span>Complete My Sign-Up</span><span style="font-style:normal">→</span>';
+  }
+};
 
 function showConfirmPage(name, email, items) {
   document.getElementById('confirmPerson').innerHTML = `
@@ -531,17 +613,16 @@ function showConfirmPage(name, email, items) {
   showPage('pageConfirm');
 }
 
-function goBack() {
+window.goBack = function() {
   showPage('pageSignup');
-  renderItems(); renderOverall();
   document.getElementById('userName').value = '';
   document.getElementById('userEmail').value = '';
-}
+};
 
 // ══════════════════════════════════════════
 //  ADMIN AUTH
 // ══════════════════════════════════════════
-function tryLogin() {
+window.tryLogin = function() {
   const pw = document.getElementById('adminPassword').value;
   const errEl = document.getElementById('loginError');
   const input = document.getElementById('adminPassword');
@@ -549,7 +630,7 @@ function tryLogin() {
     errEl.textContent = '';
     sessionStorage.setItem('adminAuth', '1');
     showPage('pageAdmin');
-    renderAdmin();
+    renderAdminData();
   } else {
     errEl.textContent = 'Incorrect password. Please try again.';
     input.classList.add('shake');
@@ -557,22 +638,20 @@ function tryLogin() {
     setTimeout(() => input.classList.remove('shake'), 400);
     input.focus();
   }
-}
+};
 
-function adminLogout() {
+window.adminLogout = function() {
   sessionStorage.removeItem('adminAuth');
   showPage('pageSignup');
-}
+};
 
 // ══════════════════════════════════════════
 //  ADMIN DASHBOARD
 // ══════════════════════════════════════════
-function renderAdmin() {
-  signups = JSON.parse(localStorage.getItem('kitSignups') || '[]');
-
-  // Stats
+function renderAdminData() {
   const kits = getOverallProgress();
-  const totalItems = signups.reduce((s,e) => s + Object.values(e.items).reduce((a,b)=>a+b,0), 0);
+  const totalItems = signups.reduce((s,e) => s + Object.values(e.items||{}).reduce((a,b)=>a+b,0), 0);
+
   document.getElementById('adminStats').innerHTML = `
     <div class="stat-card" style="animation-delay:0s">
       <div class="stat-num">${signups.length}</div>
@@ -592,7 +671,6 @@ function renderAdmin() {
     </div>
   `;
 
-  // Item progress
   const progEl = document.getElementById('adminItemProgress');
   progEl.innerHTML = '';
   ITEMS.forEach(item => {
@@ -611,7 +689,6 @@ function renderAdmin() {
     progEl.appendChild(d);
   });
 
-  // Table
   const tbody = document.getElementById('adminTableBody');
   if (!signups.length) {
     tbody.innerHTML = '<tr><td colspan="3" class="empty-admin">No sign-ups yet.</td></tr>';
@@ -619,7 +696,7 @@ function renderAdmin() {
   }
   tbody.innerHTML = '';
   [...signups].reverse().forEach(s => {
-    const pills = ITEMS.filter(it => s.items[it.id] > 0)
+    const pills = ITEMS.filter(it => (s.items||{})[it.id] > 0)
       .map(it => `<span class="item-pill">${it.emoji} ${it.name} ×${s.items[it.id]}</span>`)
       .join('');
     const tr = document.createElement('tr');
@@ -632,13 +709,16 @@ function renderAdmin() {
   });
 }
 
+// Expose renderAdmin for button
+window.renderAdmin = renderAdminData;
+
 // ══════════════════════════════════════════
 //  EXPORT CSV
 // ══════════════════════════════════════════
-function exportCSV() {
+window.exportCSV = function() {
   const headers = ['Name','Email','Sign-Up Date',...ITEMS.map(i=>i.name),'Total Items'];
   const rows = signups.map(s => {
-    const counts = ITEMS.map(it => s.items[it.id]||0);
+    const counts = ITEMS.map(it => (s.items||{})[it.id]||0);
     return [s.name, s.email, s.date||'', ...counts, counts.reduce((a,b)=>a+b,0)];
   });
   const csv = [headers,...rows].map(r => r.map(v=>`"${v}"`).join(',')).join('\n');
@@ -646,7 +726,7 @@ function exportCSV() {
   a.href = URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
   a.download = 'kit-drive-signups.csv';
   a.click();
-}
+};
 
 // ══════════════════════════════════════════
 //  TOAST
@@ -659,12 +739,13 @@ function showToast(msg) {
 }
 
 // ══════════════════════════════════════════
-//  INIT
+//  INIT — migrate old local data, then listen
 // ══════════════════════════════════════════
-renderItems();
-renderOverall();
+migrateLocalStorage();
+
+// If already authed and on admin page
 if (sessionStorage.getItem('adminAuth')==='1' && window.location.search.includes('admin')) {
-  renderAdmin();
+  showPage('pageAdmin');
 }
 </script>
 </body>
